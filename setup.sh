@@ -24,6 +24,9 @@ cat <<'EOT'
   source .venv/bin/activate
   gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 app.main:app
 
+如果提示找不到 gunicorn，请确认使用虚拟环境内的可执行文件：
+  which gunicorn
+
 可选环境变量：
   MONGO_ENABLED=true
   MONGO_URI=mongodb://localhost:27017
