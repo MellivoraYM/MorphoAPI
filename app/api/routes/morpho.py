@@ -102,9 +102,12 @@ def _compute_daily_reward(
     baseline_snapshot = storage.fetch_positions_snapshot_at_or_after(address, chain_id, start_ts)
     if baseline_snapshot:
         baseline = _parse_total_supply_usd(baseline_snapshot.payload)
+        baseline_ts = int(baseline_snapshot.created_at.replace(tzinfo=timezone.utc).timestamp())
+        baseline_ts = max(start_ts, baseline_ts)
     else:
         fallback_snapshot = storage.fetch_positions_snapshot_before(address, chain_id, target_ts)
         baseline = _parse_total_supply_usd(fallback_snapshot.payload) if fallback_snapshot else current_total_supply_usd
+        baseline_ts = start_ts
 
     current_snapshot = storage.fetch_positions_snapshot_before(address, chain_id, effective_ts)
     if current_snapshot:
@@ -112,7 +115,7 @@ def _compute_daily_reward(
     else:
         current_total = current_total_supply_usd
 
-    adjustment = _calc_event_adjustments(address, chain_id, start_ts, effective_ts)
+    adjustment = _calc_event_adjustments(address, chain_id, baseline_ts, effective_ts)
     return current_total - baseline + adjustment
 
 
