@@ -137,27 +137,61 @@ class MySQLStorage:
 
     def register_addresses(
         self, protocol: str, addresses: Sequence[str], chain_ids: Optional[Sequence[int]] = None
-    ) -> None:
+    ) -> tuple[List[str], List[str]]:
         if not addresses:
-            return
+            return [], []
+        normalized = [addr.lower() for addr in addresses]
         with self.session() as session:
             if chain_ids:
-                items = [
-                    RegisteredAddress(protocol=protocol, address=addr, chain_id=chain_id)
-                    for addr in addresses
-                    for chain_id in chain_ids
-                ]
+                existing = (
+                    session.query(RegisteredAddress.address)
+                    .filter(
+                        RegisteredAddress.protocol == protocol,
+                        RegisteredAddress.chain_id.in_(chain_ids),
+                        RegisteredAddress.address.in_(normalized),
+                    )
+                    .all()
+                )
             else:
-                items = [
-                    RegisteredAddress(protocol=protocol, address=addr, chain_id=None)
-                    for addr in addresses
-                ]
-            for item in items:
-                session.add(item)
-                try:
-                    session.flush()
-                except IntegrityError:
-                    session.rollback()
+                existing = (
+                    session.query(RegisteredAddress.address)
+                    .filter(
+                        RegisteredAddress.protocol == protocol,
+                        RegisteredAddress.chain_id.is_(None),
+                        RegisteredAddress.address.in_(normalized),
+                    )
+                    .all()
+                )
+            existing_set = {row[0] for row in existing}
+
+            inserted: List[str] = []
+            skipped: List[str] = []
+
+            if chain_ids:
+                items = []
+                for addr in normalized:
+                    if addr in existing_set:
+                        skipped.append(addr)
+                        continue
+                    for chain_id in chain_ids:
+                        items.append(RegisteredAddress(protocol=protocol, address=addr, chain_id=chain_id))
+                    inserted.append(addr)
+                session.add_all(items)
+            else:
+                items = []
+                for addr in normalized:
+                    if addr in existing_set:
+                        skipped.append(addr)
+                        continue
+                    items.append(RegisteredAddress(protocol=protocol, address=addr, chain_id=None))
+                    inserted.append(addr)
+                session.add_all(items)
+
+            try:
+                session.flush()
+            except IntegrityError:
+                session.rollback()
+            return inserted, skipped
 
     def list_registered(self, protocol: str) -> List[RegisteredAddress]:
         with self.session() as session:

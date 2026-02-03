@@ -543,11 +543,20 @@ async def get_markets(chainId: int = Query(1, alias="chainId")):
 async def register_address(protocol: str, body: RegisterRequest):
     if protocol != "morpho":
         raise HTTPException(status_code=400, detail="Unsupported protocol")
-    await asyncio.to_thread(storage.register_addresses, protocol, body.userAddressList, None)
-    # Fetch and persist transactions immediately after registration.
+    inserted, skipped = await asyncio.to_thread(
+        storage.register_addresses, protocol, body.userAddressList, None
+    )
+    # Fetch and persist transactions immediately after registration (only for new addresses).
     for chain_id in SUPPORTED_CHAIN_IDS:
-        for address in body.userAddressList:
+        for address in inserted:
             await fetch_and_store_transactions(address, chain_id)
+    if skipped:
+        return {
+            "code": 200,
+            "status": "partial_success",
+            "message": "Some addresses were already registered",
+            "skipped": skipped,
+        }
     return {"code": 200, "status": "success"}
 
 
