@@ -20,14 +20,14 @@ class Settings(BaseSettings):
     )
 
     eth_rpc_url: str = Field(default="wss://ethereum-rpc.publicnode.com", alias="ETH_RPC_URL")
-    arb_rpc_url: str = Field(
-        default="https://public-arb-mainnet.fastnode.io", alias="ARB_RPC_URL"
-    )
+    arb_rpc_url: str = Field(default="https://public-arb-mainnet.fastnode.io", alias="ARB_RPC_URL")
     base_rpc_url: str = Field(default="https://base.drpc.org", alias="BASE_RPC_URL")
 
-    mongo_enabled: bool = Field(default=True, alias="MONGO_ENABLED")
-    mongo_uri: str = Field(default="mongodb://localhost:27017", alias="MONGO_URI")
-    mongo_db: str = Field(default="morpho", alias="MONGO_DB")
+    mysql_url: str = Field(
+        default="mysql+pymysql://user:password@127.0.0.1:3306/morpho",
+        alias="MYSQL_URL",
+    )
+    scheduler_enabled: bool = Field(default=True, alias="SCHEDULER_ENABLED")
 
     class Config:
         env_file = ".env"

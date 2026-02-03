@@ -9,8 +9,9 @@ class PositionsResponse(BaseModel):
     address: str
     protocol: str
     chainId: int
-    timestamp: str
+    timestamp: int
     summary: Dict[str, str]
+    dailyReward: str
     vaultPositions: List[Dict[str, Any]]
     marketPositions: List[Dict[str, Any]]
     rewards: Dict[str, Any]
@@ -19,12 +20,12 @@ class PositionsResponse(BaseModel):
 class LiquidationResponse(BaseModel):
     address: str
     chainId: int
-    timestamp: str
+    timestamp: int
     marketPositions: List[Dict[str, Any]]
 
 
 class MarketsResponse(BaseModel):
     chainId: int
-    timestamp: str
+    timestamp: int
     vaults: List[Dict[str, Any]]
     markets: List[Dict[str, Any]]

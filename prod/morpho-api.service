@@ -1,0 +1,16 @@
+[Unit]
+Description=Morpho API (FastAPI/Gunicorn)
+After=network.target mysql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/data/MorphoAPI
+EnvironmentFile=/etc/morpho-api/env
+Environment=SCHEDULER_ENABLED=false
+ExecStart=/data/MorphoAPI/.venv/bin/bash /data/MorphoAPI/prod/start_api.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+

@@ -23,10 +23,14 @@ query UserByAddress($chainId: Int!, $address: String!) {
         shares
         assets
         assetsUsd
+        timestamp
       }
       vault {
         address
         name
+        liquidity {
+          usd
+        }
         asset {
           address
           symbol
@@ -90,6 +94,7 @@ query UserByAddress($chainId: Int!, $address: String!) {
           symbol
           address
         }
+        liquidityUsd
         avgApy
         avgNetApy
         rewards {
@@ -119,6 +124,7 @@ query UserByAddress($chainId: Int!, $address: String!) {
         borrowAssetsUsd
         collateral
         collateralUsd
+        timestamp
       }
       healthFactor
       priceVariationToLiquidationPrice
@@ -263,6 +269,151 @@ query MarketsAndVaults($chainIds: [Int!]) {
 }
 """
 
+VAULT_V2_TRANSACTIONS_QUERY = """
+query VaultV2Transactions($chainId: Int!, $address: String!, $first: Int!, $skip: Int!) {
+  vaultV2transactions(
+    first: $first
+    skip: $skip
+    orderBy: Time
+    orderDirection: Desc
+    where: { chainId_in: [$chainId], userAddress_in: [$address] }
+  ) {
+    items {
+      type
+      txHash
+      timestamp
+      blockNumber
+      data {
+        ... on VaultV2DepositData {
+          assets
+          sender
+          onBehalf
+        }
+        ... on VaultV2WithdrawData {
+          assets
+          sender
+          receiver
+          onBehalf
+        }
+        ... on VaultV2TransferData {
+          from
+          to
+        }
+      }
+      vault {
+        asset {
+          symbol
+          decimals
+          priceUsd
+        }
+      }
+    }
+  }
+}
+"""
+
+VAULT_V1_TRANSACTIONS_QUERY = """
+query VaultV1Transactions($chainId: Int!, $address: String!, $first: Int!, $skip: Int!) {
+  transactions(
+    first: $first
+    skip: $skip
+    orderBy: Timestamp
+    orderDirection: Desc
+    where: {
+      chainId_in: [$chainId]
+      userAddress_in: [$address]
+      type_in: [MetaMorphoDeposit, MetaMorphoWithdraw, MetaMorphoTransfer, MetaMorphoFee]
+    }
+  ) {
+    items {
+      type
+      hash
+      timestamp
+      blockNumber
+      data {
+        ... on VaultTransactionData {
+          assets
+          assetsUsd
+          vault {
+            asset {
+              symbol
+              decimals
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+MARKET_TRANSACTIONS_QUERY = """
+query MarketTransactions($chainId: Int!, $address: String!, $first: Int!, $skip: Int!) {
+  transactions(
+    first: $first
+    skip: $skip
+    orderBy: Timestamp
+    orderDirection: Desc
+    where: {
+      chainId_in: [$chainId]
+      userAddress_in: [$address]
+      type_in: [
+        MarketBorrow
+        MarketLiquidation
+        MarketRepay
+        MarketSupply
+        MarketSupplyCollateral
+        MarketWithdraw
+        MarketWithdrawCollateral
+      ]
+    }
+  ) {
+    items {
+      type
+      hash
+      timestamp
+      blockNumber
+      data {
+        ... on MarketCollateralTransferTransactionData {
+          assets
+          assetsUsd
+          market {
+            collateralAsset {
+              symbol
+              decimals
+            }
+            loanAsset {
+              symbol
+              decimals
+            }
+          }
+        }
+        ... on MarketTransferTransactionData {
+          assets
+          assetsUsd
+          market {
+            collateralAsset {
+              symbol
+              decimals
+            }
+            loanAsset {
+              symbol
+              decimals
+            }
+          }
+        }
+        ... on MarketLiquidationTransactionData {
+          badDebtAssets
+          badDebtAssetsUsd
+          repaidAssets
+          repaidAssetsUsd
+        }
+      }
+    }
+  }
+}
+"""
+
 
 def safe_get(data: Any, key: str, default: Any = None) -> Any:
     if not isinstance(data, dict):
@@ -334,6 +485,19 @@ def compute_weighted_reward_apy(
     return total
 
 
+def _risk_level(liquidity_usd: Decimal, assets_usd: Decimal) -> str:
+    if assets_usd <= 0:
+        return "Low Risk"
+    ratio = liquidity_usd / assets_usd
+    if ratio > 1:
+        return "Low Risk"
+    if ratio >= Decimal("0.7"):
+        return "Medium Risk"
+    if ratio < Decimal("0.3"):
+        return "High Risk"
+    return "Medium Risk"
+
+
 class MorphoClient:
     def __init__(self) -> None:
         self._url = settings.morpho_graphql_url
@@ -359,12 +523,37 @@ class MorphoClient:
     async def fetch_markets(self, chain_id: int) -> Dict[str, Any]:
         return await self._query(MARKETS_QUERY, {"chainIds": [chain_id]})
 
+    async def fetch_vault_v2_transactions(
+        self, chain_id: int, address: str, first: int = 100, skip: int = 0
+    ) -> Dict[str, Any]:
+        return await self._query(
+            VAULT_V2_TRANSACTIONS_QUERY,
+            {"chainId": chain_id, "address": address, "first": first, "skip": skip},
+        )
+
+    async def fetch_vault_v1_transactions(
+        self, chain_id: int, address: str, first: int = 100, skip: int = 0
+    ) -> Dict[str, Any]:
+        return await self._query(
+            VAULT_V1_TRANSACTIONS_QUERY,
+            {"chainId": chain_id, "address": address, "first": first, "skip": skip},
+        )
+
+    async def fetch_market_transactions(
+        self, chain_id: int, address: str, first: int = 100, skip: int = 0
+    ) -> Dict[str, Any]:
+        return await self._query(
+            MARKET_TRANSACTIONS_QUERY,
+            {"chainId": chain_id, "address": address, "first": first, "skip": skip},
+        )
+
 
 async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, Any]:
     state = safe_get(position, "state", {})
     vault = safe_get(position, "vault", {})
     vault_state = safe_get(vault, "state", {})
     asset = safe_get(vault, "asset", {})
+    liquidity_usd = to_decimal(safe_get(safe_get(vault, "liquidity", {}), "usd", 0))
 
     total_assets_usd = to_decimal(safe_get(vault_state, "totalAssetsUsd", 0))
     allocation = safe_get(vault_state, "allocation", []) or []
@@ -401,7 +590,7 @@ async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, An
     if curators:
         curator_name = safe_get(curators[0], "name")
 
-    return {
+    payload = {
         "vaultAddress": safe_get(vault, "address"),
         "vaultName": safe_get(vault, "name"),
         "curator": curator_name,
@@ -417,13 +606,19 @@ async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, An
         },
         "performanceFee": format_optional_decimal(safe_get(vault_state, "fee"), 2),
         "totalAssets": format_optional_decimal(total_assets_usd, 2),
+        "riskLevel": _risk_level(liquidity_usd, to_decimal(safe_get(state, "assetsUsd", 0))),
         "allocations": allocations,
     }
 
+    return payload
 
-async def build_vault_position_from_v2(position: Dict[str, Any], allocation_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+
+async def build_vault_position_from_v2(
+    position: Dict[str, Any], allocation_data: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
     vault = safe_get(position, "vault", {})
     asset = safe_get(vault, "asset", {})
+    liquidity_usd = to_decimal(safe_get(vault, "liquidityUsd", 0))
 
     total_assets_usd = to_decimal(safe_get(vault, "totalAssetsUsd", 0))
     rewards = safe_get(vault, "rewards", []) or []
@@ -465,7 +660,7 @@ async def build_vault_position_from_v2(position: Dict[str, Any], allocation_data
         if cur_items:
             curator_name = safe_get(cur_items[0], "name")
 
-    return {
+    payload = {
         "vaultAddress": safe_get(vault, "address"),
         "vaultName": safe_get(vault, "name"),
         "curator": curator_name,
@@ -481,8 +676,11 @@ async def build_vault_position_from_v2(position: Dict[str, Any], allocation_data
         },
         "performanceFee": format_optional_decimal(safe_get(vault, "performanceFee"), 2),
         "totalAssets": format_optional_decimal(total_assets_usd, 2),
+        "riskLevel": _risk_level(liquidity_usd, to_decimal(safe_get(position, "assetsUsd", 0))),
         "allocations": allocations,
     }
+
+    return payload
 
 
 def build_market_positions(market_positions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

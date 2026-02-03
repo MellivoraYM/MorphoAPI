@@ -8,36 +8,32 @@
 ./setup.sh
 ```
 
-启动服务（生产）：
+启动服务（生产，推荐“两套服务”）：
 
 ```bash
 source .venv/bin/activate
-gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 app.main:app
+export MYSQL_URL="mysql+pymysql://<user>:<password>@127.0.0.1:3306/morpho"
+
+# 1) scheduler（单实例，避免重复入库）
+SCHEDULER_ENABLED=true  gunicorn -k uvicorn.workers.UvicornWorker -w 1 -b 0.0.0.0:8001 app.main:app
+
+# 2) API（多 worker，高并发）
+SCHEDULER_ENABLED=false gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:8000 app.main:app
 ```
 
-## 压测脚本
+也可以使用仓库内脚本与 systemd 模板（见 `prod/` 目录）。
 
-准备 `targets.csv`（无表头）：
-
-```
-1,0x...
-42161,0x...
-8453,0x...
-```
-
-运行：
-
-```bash
-./load_test.sh -u http://127.0.0.1:8000 -e positions -f targets.csv -c 10
-```
-
-支持 `positions` / `liquidation`。
+建议在生产环境仅启用单个调度器实例，避免多 worker 或 reload 重复入库：
 
 ## 接口说明
 
 - `GET /api/v1/morpho/{address}/positions?chainId=1`
+- `GET /api/v1/morpho/{address}/positions?chainId=1&timestamp=1700000000`
 - `GET /api/v1/morpho/{address}/liquidation?chainId=1`
 - `GET /api/v1/morpho/markets?chainId=1`
+- `POST /api/v1/morpho/register`
+- `GET /api/v1/history/morpho/{address}/event?chainId=1`
+- `GET /api/v1/history/morpho/{address}/positions?chainId=1&startTime=...&endTime=...&interval=day`
 
 `chainId` 参数可选，默认 `1`（Ethereum 主网）。
 
@@ -47,17 +43,23 @@ gunicorn -k uvicorn.workers.UvicornWorker -w 2 -b 0.0.0.0:8000 app.main:app
 - ReDoc: `http://<host>:8000/redoc`
 - OpenAPI JSON: `http://<host>:8000/openapi.json`
 
-## MongoDB 持久化
+## MySQL 持久化
 
-- 默认启用（`MONGO_ENABLED=true`）
-- 每次接口调用会写入一条快照到集合：`positions` / `liquidation` / `markets`
-- 字段包含 `createdAt` 与接口返回完整 payload
+- 使用 MySQL 8，数据库默认 `morpho`
+- 定时任务每分钟写入快照（positions/liquidation）
+- markets 快照每 5 分钟写入一次
+- 定时任务每小时写入历史仓位数据
+- 历史交易记录仅在调用 `GET /api/v1/history/morpho/{address}/event` 或注册时拉取并去重入库
+
+## positions 补充字段
+
+- `riskLevel`：基于 `liquidityUsd / assetsUsd` 判断（Low/Medium/High）
+- `dailyReward`：基于指定日零点到当前的总资产增量（支持 `timestamp` 参数）
 
 ## 环境变量（可选）
 
-- `MONGO_ENABLED`（默认 `true`）
-- `MONGO_URI`（默认 `mongodb://localhost:27017`）
-- `MONGO_DB`（默认 `morpho`）
+- `MYSQL_URL`（默认 `mysql+pymysql://<user>:<password>@127.0.0.1:3306/morpho`）
+- `SCHEDULER_ENABLED`（默认 `true`）
 - `MORPHO_GRAPHQL_URL`（默认 `https://api.morpho.org/graphql`）
 - `MORPHO_REWARDS_URL`（默认 `https://rewards.morpho.org/v1`）
 - `ETH_RPC_URL`（默认 `wss://ethereum-rpc.publicnode.com`）
