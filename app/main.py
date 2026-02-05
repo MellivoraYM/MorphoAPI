@@ -16,6 +16,7 @@ from app.api.routes.morpho import (
     build_positions_payload_from_user,
     fetch_and_store_transactions,
     history_router,
+    rewards_router,
     morpho_client,
     register_router,
     rewards_client,
@@ -45,6 +46,7 @@ app = FastAPI(
 app.include_router(morpho_router)
 app.include_router(history_router)
 app.include_router(register_router)
+app.include_router(rewards_router)
 
 scheduler = AsyncIOScheduler()
 

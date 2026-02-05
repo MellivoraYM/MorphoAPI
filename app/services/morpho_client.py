@@ -301,6 +301,7 @@ query VaultV2Transactions($chainId: Int!, $address: String!, $first: Int!, $skip
         }
       }
       vault {
+        address
         asset {
           symbol
           decimals
@@ -335,6 +336,7 @@ query VaultV1Transactions($chainId: Int!, $address: String!, $first: Int!, $skip
           assets
           assetsUsd
           vault {
+            address
             asset {
               symbol
               decimals
@@ -458,6 +460,13 @@ def format_optional_decimal(value: Any, decimals: int = 2) -> str:
     return format_decimal(to_decimal(value), decimals)
 
 
+def format_full_decimal(value: Any) -> str:
+    dec = to_decimal(value)
+    if not dec.is_finite():
+        return "0"
+    return dec.to_eng_string()
+
+
 def format_optional_raw(value: Any) -> str:
     if value is None:
         return "0"
@@ -548,7 +557,9 @@ class MorphoClient:
         )
 
 
-async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, Any]:
+async def build_vault_position_from_v1(
+    position: Dict[str, Any], daily_reward: Optional[str] = None
+) -> Dict[str, Any]:
     state = safe_get(position, "state", {})
     vault = safe_get(position, "vault", {})
     vault_state = safe_get(vault, "state", {})
@@ -598,7 +609,7 @@ async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, An
         "assetAddress": safe_get(asset, "address"),
         "shares": format_optional_raw(safe_get(state, "shares")),
         "balance": format_optional_decimal(safe_get(state, "assets"), 2),
-        "balanceUsd": format_optional_decimal(safe_get(state, "assetsUsd"), 2),
+        "balanceUsd": format_full_decimal(safe_get(state, "assetsUsd")),
         "apy": {
             "netApy": to_percent(net_apy_dec, 2),
             "baseApy": to_percent(base_apy_dec, 2),
@@ -607,6 +618,7 @@ async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, An
         "performanceFee": format_optional_decimal(safe_get(vault_state, "fee"), 2),
         "totalAssets": format_optional_decimal(total_assets_usd, 2),
         "riskLevel": _risk_level(liquidity_usd, to_decimal(safe_get(state, "assetsUsd", 0))),
+        "dailyReward": daily_reward,
         "allocations": allocations,
     }
 
@@ -614,7 +626,9 @@ async def build_vault_position_from_v1(position: Dict[str, Any]) -> Dict[str, An
 
 
 async def build_vault_position_from_v2(
-    position: Dict[str, Any], allocation_data: Optional[Dict[str, Any]]
+    position: Dict[str, Any],
+    allocation_data: Optional[Dict[str, Any]],
+    daily_reward: Optional[str] = None,
 ) -> Dict[str, Any]:
     vault = safe_get(position, "vault", {})
     asset = safe_get(vault, "asset", {})
@@ -668,7 +682,7 @@ async def build_vault_position_from_v2(
         "assetAddress": safe_get(asset, "address"),
         "shares": format_optional_raw(safe_get(position, "shares")),
         "balance": format_optional_decimal(safe_get(position, "assets"), 2),
-        "balanceUsd": format_optional_decimal(safe_get(position, "assetsUsd"), 2),
+        "balanceUsd": format_full_decimal(safe_get(position, "assetsUsd")),
         "apy": {
             "netApy": to_percent(net_apy_dec, 2),
             "baseApy": to_percent(base_apy_dec, 2),
@@ -677,6 +691,7 @@ async def build_vault_position_from_v2(
         "performanceFee": format_optional_decimal(safe_get(vault, "performanceFee"), 2),
         "totalAssets": format_optional_decimal(total_assets_usd, 2),
         "riskLevel": _risk_level(liquidity_usd, to_decimal(safe_get(position, "assetsUsd", 0))),
+        "dailyReward": daily_reward,
         "allocations": allocations,
     }
 
@@ -705,16 +720,16 @@ def build_market_positions(market_positions: List[Dict[str, Any]]) -> List[Dict[
                 "supply": {
                     "shares": format_optional_raw(safe_get(state, "supplyShares")),
                     "assets": format_optional_decimal(safe_get(state, "supplyAssets"), 2),
-                    "assetsUsd": format_optional_decimal(safe_get(state, "supplyAssetsUsd"), 2),
+                    "assetsUsd": format_full_decimal(safe_get(state, "supplyAssetsUsd")),
                 },
                 "borrow": {
                     "shares": format_optional_raw(safe_get(state, "borrowShares")),
                     "assets": format_optional_decimal(safe_get(state, "borrowAssets"), 2),
-                    "assetsUsd": format_optional_decimal(safe_get(state, "borrowAssetsUsd"), 2),
+                    "assetsUsd": format_full_decimal(safe_get(state, "borrowAssetsUsd")),
                 },
                 "collateral": {
                     "assets": format_optional_decimal(safe_get(state, "collateral"), 2),
-                    "assetsUsd": format_optional_decimal(safe_get(state, "collateralUsd"), 2),
+                    "assetsUsd": format_full_decimal(safe_get(state, "collateralUsd")),
                 },
                 "healthFactor": format_optional_decimal(safe_get(position, "healthFactor"), 2),
                 "apy": {

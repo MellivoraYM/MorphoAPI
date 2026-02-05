@@ -17,6 +17,7 @@ from app.services.morpho_client import (
     build_vault_position_from_v1,
     build_vault_position_from_v2,
     format_decimal,
+    format_full_decimal,
     format_optional_decimal,
     normalize_lltv,
     safe_get,
@@ -30,6 +31,7 @@ from app.services.storage import MySQLStorage
 router = APIRouter(prefix="/api/v1/morpho", tags=["morpho"])
 history_router = APIRouter(prefix="/api/v1/history/morpho", tags=["history"])
 register_router = APIRouter(prefix="/api/v1", tags=["register"])
+rewards_router = APIRouter(prefix="/api/v1/morpho", tags=["morpho-rewards"])
 
 morpho_client = MorphoClient()
 rewards_client = RewardsClient()
@@ -70,11 +72,16 @@ def _calc_event_adjustments(
     chain_id: int,
     start_ts: int,
     end_ts: int,
+    vault_address: Optional[str] = None,
 ) -> Decimal:
     vault_txs = storage.fetch_vault_transactions_by_time(address, chain_id, start_ts, end_ts)
     adjustment = Decimal("0")
     for tx in vault_txs:
         data = tx.data or {}
+        if vault_address:
+            tx_vault = (data.get("vaultAddress") or "").lower()
+            if not tx_vault or tx_vault != vault_address.lower():
+                continue
         amount_usd = to_decimal(data.get("priceUsd", 0))
         tx_type = tx.type
         if tx_type == "Deposit":
@@ -88,6 +95,55 @@ def _calc_event_adjustments(
             elif direction == "out":
                 adjustment -= amount_usd
     return adjustment
+
+
+def _extract_vault_balance_usd(payload: Dict[str, Any], vault_address: str) -> Optional[Decimal]:
+    if not payload:
+        return None
+    for item in payload.get("vaultPositions", []) or []:
+        if (item.get("vaultAddress") or "").lower() == vault_address.lower():
+            return to_decimal(item.get("balanceUsd", 0))
+    return None
+
+
+def _compute_vault_daily_reward(
+    address: str,
+    chain_id: int,
+    vault_address: str,
+    target_ts: int,
+    current_balance_usd: Decimal,
+) -> Decimal:
+    start_ts, end_ts = _day_bounds(target_ts)
+    today_start, _ = _day_bounds(now_ts())
+    effective_ts = end_ts if start_ts < today_start else target_ts
+
+    baseline_snapshot = storage.fetch_positions_snapshot_at_or_after(address, chain_id, start_ts)
+    if baseline_snapshot:
+        baseline_balance = _extract_vault_balance_usd(baseline_snapshot.payload, vault_address)
+        baseline_ts = int(baseline_snapshot.created_at.replace(tzinfo=timezone.utc).timestamp())
+        baseline_ts = max(start_ts, baseline_ts)
+    else:
+        baseline_balance = None
+        baseline_ts = start_ts
+
+    if baseline_balance is None:
+        fallback_snapshot = storage.fetch_positions_snapshot_before(address, chain_id, target_ts)
+        baseline_balance = (
+            _extract_vault_balance_usd(fallback_snapshot.payload, vault_address)
+            if fallback_snapshot
+            else current_balance_usd
+        )
+
+    current_snapshot = storage.fetch_positions_snapshot_before(address, chain_id, effective_ts)
+    if current_snapshot:
+        current_balance = _extract_vault_balance_usd(current_snapshot.payload, vault_address)
+    else:
+        current_balance = None
+    if current_balance is None:
+        current_balance = current_balance_usd
+
+    adjustment = _calc_event_adjustments(address, chain_id, baseline_ts, effective_ts, vault_address)
+    return current_balance - baseline_balance + adjustment
 
 
 def _compute_daily_reward(
@@ -134,12 +190,12 @@ async def build_positions_payload_from_user(
     effective_ts = target_ts or now_ts()
     daily_reward = _compute_daily_reward(address, chain_id, effective_ts, current_total_supply_usd)
     summary = {
-        "totalSupplyUsd": format_optional_decimal(
+        "totalSupplyUsd": format_full_decimal(
             to_decimal(safe_get(state, "vaultV2sAssetsUsd", 0))
             + to_decimal(safe_get(state, "vaultsAssetsUsd", 0))
         ),
-        "totalBorrowUsd": format_optional_decimal(safe_get(state, "marketsBorrowAssetsUsd", 0)),
-        "netWorthUsd": format_optional_decimal(
+        "totalBorrowUsd": format_full_decimal(safe_get(state, "marketsBorrowAssetsUsd", 0)),
+        "netWorthUsd": format_full_decimal(
             to_decimal(safe_get(state, "marketsCollateralUsd", 0))
             - to_decimal(safe_get(state, "marketsBorrowAssetsUsd", 0))
             + to_decimal(safe_get(state, "vaultV2sAssetsUsd", 0))
@@ -149,7 +205,20 @@ async def build_positions_payload_from_user(
 
     vault_positions: List[Dict[str, Any]] = []
     for v1_position in safe_get(user, "vaultPositions", []) or []:
-        vault_positions.append(await build_vault_position_from_v1(v1_position))
+        vault = safe_get(v1_position, "vault", {})
+        vault_address = safe_get(vault, "address")
+        current_balance_usd = to_decimal(safe_get(safe_get(v1_position, "state", {}), "assetsUsd", 0))
+        vault_daily = None
+        if vault_address:
+            vault_daily = _compute_vault_daily_reward(
+                address, chain_id, vault_address, effective_ts, current_balance_usd
+            )
+        vault_positions.append(
+            await build_vault_position_from_v1(
+                v1_position,
+                format_full_decimal(vault_daily) if vault_daily is not None else None,
+            )
+        )
 
     v2_positions = safe_get(user, "vaultV2Positions", []) or []
 
@@ -183,7 +252,19 @@ async def build_positions_payload_from_user(
             except Exception:
                 allocation_data = None
 
-        return await build_vault_position_from_v2(position, allocation_data)
+        vault = safe_get(position, "vault", {})
+        vault_address = safe_get(vault, "address")
+        current_balance_usd = to_decimal(safe_get(position, "assetsUsd", 0))
+        vault_daily = None
+        if vault_address:
+            vault_daily = _compute_vault_daily_reward(
+                address, chain_id, vault_address, effective_ts, current_balance_usd
+            )
+        return await build_vault_position_from_v2(
+            position,
+            allocation_data,
+            format_full_decimal(vault_daily) if vault_daily is not None else None,
+        )
 
     if v2_positions:
         v2_results = await asyncio.gather(*[fetch_v2_position(p) for p in v2_positions])
@@ -206,7 +287,7 @@ async def build_positions_payload_from_user(
             {k: v for k, v in item.items() if k != "_extra"} for item in market_positions
         ],
         "rewards": {"unclaimedRewards": unclaimed_rewards},
-        "dailyReward": format_decimal(daily_reward, 2),
+        "totalDailyReward": format_full_decimal(daily_reward),
     }
 
 
@@ -358,6 +439,7 @@ async def fetch_and_store_transactions(address: str, chain_id: int) -> Dict[str,
             "timestamp": int(safe_get(item, "timestamp", 0) or 0),
             "blockNumber": safe_get(item, "blockNumber"),
             "data": {
+                "vaultAddress": safe_get(vault, "address"),
                 "asset": safe_get(asset, "symbol"),
                 "amount": float(amount),
                 "priceUsd": float(amount * price),
@@ -383,6 +465,7 @@ async def fetch_and_store_transactions(address: str, chain_id: int) -> Dict[str,
             "timestamp": int(safe_get(item, "timestamp", 0) or 0),
             "blockNumber": safe_get(item, "blockNumber"),
             "data": {
+                "vaultAddress": safe_get(vault, "address"),
                 "asset": safe_get(asset, "symbol"),
                 "amount": float(amount),
                 "priceUsd": float(assets_usd) if assets_usd is not None else None,
@@ -452,7 +535,7 @@ async def build_positions_history_payload(address: str, chain_id: int) -> Dict[s
                 "vaultAddress": safe_get(vault, "address"),
                 "vaultName": safe_get(vault, "name"),
                 "balance": format_optional_decimal(safe_get(state, "assets"), 2),
-                "balanceUsd": format_optional_decimal(safe_get(state, "assetsUsd"), 2),
+                "balanceUsd": format_full_decimal(safe_get(state, "assetsUsd")),
                 "apy": to_percent(safe_get(safe_get(vault, "state", {}), "avgNetApy", 0), 2),
             }
         )
@@ -464,7 +547,7 @@ async def build_positions_history_payload(address: str, chain_id: int) -> Dict[s
                 "vaultAddress": safe_get(vault, "address"),
                 "vaultName": safe_get(vault, "name"),
                 "balance": format_optional_decimal(safe_get(item, "assets"), 2),
-                "balanceUsd": format_optional_decimal(safe_get(item, "assetsUsd"), 2),
+                "balanceUsd": format_full_decimal(safe_get(item, "assetsUsd")),
                 "apy": to_percent(safe_get(vault, "avgNetApy", 0), 2),
             }
         )
@@ -481,8 +564,8 @@ async def build_positions_history_payload(address: str, chain_id: int) -> Dict[s
                 "marketId": safe_get(market, "uniqueKey"),
                 "marketName": market_name,
                 "healthFactor": format_optional_decimal(safe_get(item, "healthFactor"), 2),
-                "collateralUsd": format_optional_decimal(safe_get(state, "collateralUsd"), 2),
-                "borrowUsd": format_optional_decimal(safe_get(state, "borrowAssetsUsd"), 2),
+                "collateralUsd": format_full_decimal(safe_get(state, "collateralUsd")),
+                "borrowUsd": format_full_decimal(safe_get(state, "borrowAssetsUsd")),
             }
         )
 
@@ -508,7 +591,7 @@ async def build_positions_history_payload(address: str, chain_id: int) -> Dict[s
         "timestamp": timestamp,
         "vaultPositions": vault_positions,
         "marketPositions": market_positions,
-        "dailyReward": format_decimal(daily_reward, 2),
+        "totalDailyReward": format_full_decimal(daily_reward),
     }
 @router.get("/{address}/positions", response_model=PositionsResponse)
 async def get_positions(
@@ -537,6 +620,55 @@ async def get_markets(chainId: int = Query(1, alias="chainId")):
     payload = await build_markets_payload(chain_id)
     await asyncio.to_thread(storage.save_markets_snapshot, payload)
     return payload
+
+
+@rewards_router.get("/{address}/rewards")
+async def get_rewards(
+    address: str,
+    chainId: int = Query(1, alias="chainId"),
+    timestamp: Optional[int] = Query(None, alias="timestamp"),
+):
+    chain_id = validate_chain_id(chainId)
+    target_ts = timestamp or now_ts()
+
+    latest = storage.fetch_latest_positions_snapshot(address, chain_id)
+    total_daily_reward = "0"
+    latest_ts = target_ts
+    if latest:
+        latest_ts = int(latest.snapshot_ts or int(latest.created_at.replace(tzinfo=timezone.utc).timestamp()))
+        total_daily_reward = latest.total_daily_reward.to_eng_string() if latest.total_daily_reward else "0"
+
+    start_ts = int((datetime.fromtimestamp(target_ts, tz=timezone.utc) - timedelta(days=30)).timestamp())
+    snapshots = storage.fetch_positions_snapshots_in_range(address, chain_id, start_ts, target_ts)
+
+    day_map: Dict[int, PositionsSnapshot] = {}
+    for snap in snapshots:
+        snap_ts = int(snap.snapshot_ts or int(snap.created_at.replace(tzinfo=timezone.utc).timestamp()))
+        day_start, _ = _day_bounds(snap_ts)
+        existing = day_map.get(day_start)
+        if not existing or snap_ts >= int(existing.snapshot_ts or int(existing.created_at.replace(tzinfo=timezone.utc).timestamp())):
+            day_map[day_start] = snap
+
+    daily_list = []
+    for day_start in sorted(day_map.keys()):
+        snap = day_map[day_start]
+        snap_ts = int(snap.snapshot_ts or int(snap.created_at.replace(tzinfo=timezone.utc).timestamp()))
+        daily_reward = snap.total_daily_reward.to_eng_string() if snap.total_daily_reward else "0"
+        daily_list.append(
+            {
+                "timestamp": snap_ts,
+                "totalDailyReward": daily_reward,
+            }
+        )
+
+    return {
+        "address": address,
+        "protocol": "morpho",
+        "chainId": chain_id,
+        "timestamp": latest_ts,
+        "totalDailyRewards": total_daily_reward,
+        "totalDailyRewardsIn30D": daily_list,
+    }
 
 
 @register_router.post("/{protocol}/register")
@@ -615,7 +747,7 @@ async def get_history_positions(
                 "timestamp": bucket_ts,
                 "vaultPositions": payload.get("vaultPositions", []),
                 "marketPositions": payload.get("marketPositions", []),
-                "dailyReward": payload.get("dailyReward"),
+                "totalDailyReward": payload.get("totalDailyReward"),
             }
         )
 

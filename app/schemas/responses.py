@@ -11,7 +11,7 @@ class PositionsResponse(BaseModel):
     chainId: int
     timestamp: int
     summary: Dict[str, str]
-    dailyReward: str
+    totalDailyReward: str
     vaultPositions: List[Dict[str, Any]]
     marketPositions: List[Dict[str, Any]]
     rewards: Dict[str, Any]

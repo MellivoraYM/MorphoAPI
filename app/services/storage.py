@@ -2,9 +2,21 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from sqlalchemy import JSON, BigInteger, Column, DateTime, Integer, String, UniqueConstraint, create_engine
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Column,
+    DateTime,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    create_engine,
+    text,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
@@ -16,6 +28,17 @@ Base = declarative_base()
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _to_decimal(value: Any) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
 
 
 class RegisteredAddress(Base):
@@ -40,6 +63,11 @@ class PositionsSnapshot(Base):
     chain_id = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=_now_dt, nullable=False)
     payload = Column(JSON, nullable=False)
+    total_supply_usd = Column(Numeric(36, 18), nullable=True)
+    total_borrow_usd = Column(Numeric(36, 18), nullable=True)
+    net_worth_usd = Column(Numeric(36, 18), nullable=True)
+    total_daily_reward = Column(Numeric(36, 18), nullable=True)
+    snapshot_ts = Column(BigInteger, nullable=True)
 
 
 class LiquidationSnapshot(Base):
@@ -119,6 +147,32 @@ class MySQLStorage:
         )
         self._session_factory = sessionmaker(self._engine, expire_on_commit=False, class_=Session)
         Base.metadata.create_all(self._engine)
+        self._ensure_positions_snapshot_columns()
+
+    def _ensure_positions_snapshot_columns(self) -> None:
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    SELECT COLUMN_NAME
+                    FROM INFORMATION_SCHEMA.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                      AND TABLE_NAME = 'positions_snapshots'
+                    """
+                )
+            )
+            existing = {row[0] for row in result.fetchall()}
+
+            ddl = [
+                ("total_supply_usd", "ALTER TABLE positions_snapshots ADD COLUMN total_supply_usd DECIMAL(36,18) NULL"),
+                ("total_borrow_usd", "ALTER TABLE positions_snapshots ADD COLUMN total_borrow_usd DECIMAL(36,18) NULL"),
+                ("net_worth_usd", "ALTER TABLE positions_snapshots ADD COLUMN net_worth_usd DECIMAL(36,18) NULL"),
+                ("total_daily_reward", "ALTER TABLE positions_snapshots ADD COLUMN total_daily_reward DECIMAL(36,18) NULL"),
+                ("snapshot_ts", "ALTER TABLE positions_snapshots ADD COLUMN snapshot_ts BIGINT NULL"),
+            ]
+            for column, statement in ddl:
+                if column not in existing:
+                    conn.execute(text(statement))
 
     @contextlib.contextmanager
     def session(self) -> Iterable[Session]:
@@ -202,12 +256,23 @@ class MySQLStorage:
             )
 
     def save_positions_snapshot(self, payload: Dict[str, Any]) -> None:
+        summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
+        total_supply = _to_decimal(summary.get("totalSupplyUsd"))
+        total_borrow = _to_decimal(summary.get("totalBorrowUsd"))
+        net_worth = _to_decimal(summary.get("netWorthUsd"))
+        total_daily_reward = _to_decimal(payload.get("totalDailyReward"))
+        snapshot_ts = payload.get("timestamp")
         with self.session() as session:
             session.add(
                 PositionsSnapshot(
                     address=payload.get("address", ""),
                     chain_id=payload.get("chainId", 0),
                     payload=payload,
+                    total_supply_usd=total_supply,
+                    total_borrow_usd=total_borrow,
+                    net_worth_usd=net_worth,
+                    total_daily_reward=total_daily_reward,
+                    snapshot_ts=int(snapshot_ts) if snapshot_ts is not None else None,
                 )
             )
 
@@ -407,5 +472,37 @@ class MySQLStorage:
                     PositionsHistory.timestamp <= end_ts,
                 )
                 .order_by(PositionsHistory.timestamp.asc())
+                .all()
+            )
+
+    def fetch_latest_positions_snapshot(
+        self, address: str, chain_id: int
+    ) -> Optional[PositionsSnapshot]:
+        with self.session() as session:
+            return (
+                session.query(PositionsSnapshot)
+                .filter(
+                    PositionsSnapshot.address == address,
+                    PositionsSnapshot.chain_id == chain_id,
+                )
+                .order_by(PositionsSnapshot.created_at.desc())
+                .first()
+            )
+
+    def fetch_positions_snapshots_in_range(
+        self, address: str, chain_id: int, start_ts: int, end_ts: int
+    ) -> List[PositionsSnapshot]:
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        with self.session() as session:
+            return (
+                session.query(PositionsSnapshot)
+                .filter(
+                    PositionsSnapshot.address == address,
+                    PositionsSnapshot.chain_id == chain_id,
+                    PositionsSnapshot.created_at >= start_dt,
+                    PositionsSnapshot.created_at <= end_dt,
+                )
+                .order_by(PositionsSnapshot.created_at.asc())
                 .all()
             )

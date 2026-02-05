@@ -31,6 +31,7 @@ SCHEDULER_ENABLED=false gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.
 - `GET /api/v1/morpho/{address}/positions?chainId=1&timestamp=1700000000`
 - `GET /api/v1/morpho/{address}/liquidation?chainId=1`
 - `GET /api/v1/morpho/markets?chainId=1`
+- `GET /api/v1/morpho/{address}/rewards?chainId=1&timestamp=1700000000`
 - `POST /api/v1/morpho/register`
 - `GET /api/v1/history/morpho/{address}/event?chainId=1`
 - `GET /api/v1/history/morpho/{address}/positions?chainId=1&startTime=...&endTime=...&interval=day`
@@ -54,7 +55,8 @@ SCHEDULER_ENABLED=false gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.
 ## positions 补充字段
 
 - `riskLevel`：基于 `liquidityUsd / assetsUsd` 判断（Low/Medium/High）
-- `dailyReward`：基于指定日零点到当前的总资产增量（支持 `timestamp` 参数）
+- `totalDailyReward`：基于指定日零点到当前的总资产增量（支持 `timestamp` 参数）
+- `vaultPositions[].dailyReward`：每个 vault 的日收益（基于 vault balanceUsd）
 
 ## 环境变量（可选）
 
