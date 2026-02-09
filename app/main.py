@@ -5,15 +5,20 @@ import warnings
 from typing import Dict, List
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes.morpho import (
+    APIError,
     SUPPORTED_CHAIN_IDS,
     build_liquidation_from_user,
     build_markets_payload,
     build_positions_history_payload,
     build_positions_payload,
     build_positions_payload_from_user,
+    error_response,
     fetch_and_store_transactions,
     history_router,
     rewards_router,
@@ -49,6 +54,31 @@ app.include_router(register_router)
 app.include_router(rewards_router)
 
 scheduler = AsyncIOScheduler()
+
+
+@app.exception_handler(APIError)
+async def handle_api_error(_: Request, exc: APIError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.http_status,
+        content=error_response(exc.code, exc.message),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content=error_response(4000, "Validation error", details=exc.errors()),
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def handle_http_exception(_: Request, exc: StarletteHTTPException) -> JSONResponse:
+    message = exc.detail if isinstance(exc.detail, str) else "Request error"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=error_response(4000, message),
+    )
 
 
 def _collect_addresses_by_chain() -> Dict[int, List[str]]:

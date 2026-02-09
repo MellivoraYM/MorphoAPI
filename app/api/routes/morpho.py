@@ -5,11 +5,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from app.core.config import settings
-from app.schemas.responses import LiquidationResponse, MarketsResponse, PositionsResponse
 from app.services.morpho_client import (
     MorphoClient,
     build_market_positions,
@@ -45,9 +44,24 @@ def now_ts() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
+class APIError(Exception):
+    def __init__(self, code: int, message: str, http_status: int = 400) -> None:
+        self.code = code
+        self.message = message
+        self.http_status = http_status
+        super().__init__(message)
+
+
+def error_response(code: int, message: str, details: Optional[Any] = None) -> Dict[str, Any]:
+    payload = {"code": code, "status": "error", "message": message}
+    if details is not None:
+        payload["details"] = details
+    return payload
+
+
 def validate_chain_id(chain_id: int) -> int:
     if chain_id not in SUPPORTED_CHAIN_IDS:
-        raise HTTPException(status_code=400, detail="Unsupported chainId")
+        raise APIError(4001, "Unsupported chainId", 400)
     return chain_id
 
 
@@ -299,11 +313,18 @@ async def build_positions_payload(
     user_data, rewards_data = await asyncio.gather(user_data_task, rewards_task, return_exceptions=True)
 
     if isinstance(user_data, Exception):
-        raise HTTPException(status_code=502, detail="Failed to fetch Morpho data")
+        raise APIError(5000, "Failed to fetch Morpho data", 502)
 
     user = safe_get(user_data, "userByAddress")
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise APIError(4004, "No position data found for this user", 404)
+
+    has_positions = any(
+        safe_get(user, key)
+        for key in ("vaultPositions", "vaultV2Positions", "marketPositions")
+    )
+    if not has_positions:
+        raise APIError(4004, "No position data found for this user", 404)
 
     return await build_positions_payload_from_user(user, address, chain_id, rewards_data, target_ts)
 
@@ -381,7 +402,7 @@ async def build_liquidation_payload(address: str, chain_id: int) -> Dict[str, An
     user_data = await morpho_client.fetch_user_by_address(chain_id, address)
     user = safe_get(user_data, "userByAddress")
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise APIError(4004, "User not found", 404)
 
     return build_liquidation_from_user(user, address, chain_id)
 
@@ -524,7 +545,7 @@ async def build_positions_history_payload(address: str, chain_id: int) -> Dict[s
     user_data = await morpho_client.fetch_user_by_address(chain_id, address)
     user = safe_get(user_data, "userByAddress")
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise APIError(4004, "User not found", 404)
 
     vault_positions = []
     for item in safe_get(user, "vaultPositions", []) or []:
@@ -593,7 +614,7 @@ async def build_positions_history_payload(address: str, chain_id: int) -> Dict[s
         "marketPositions": market_positions,
         "totalDailyReward": format_full_decimal(daily_reward),
     }
-@router.get("/{address}/positions", response_model=PositionsResponse)
+@router.get("/{address}/positions")
 async def get_positions(
     address: str,
     chainId: int = Query(1, alias="chainId"),
@@ -605,7 +626,7 @@ async def get_positions(
     return payload
 
 
-@router.get("/{address}/liquidation", response_model=LiquidationResponse)
+@router.get("/{address}/liquidation")
 async def get_liquidation(address: str, chainId: int = Query(1, alias="chainId")):
     chain_id = validate_chain_id(chainId)
     payload = await build_liquidation_payload(address, chain_id)
@@ -613,7 +634,7 @@ async def get_liquidation(address: str, chainId: int = Query(1, alias="chainId")
     return payload
 
 
-@router.get("/markets", response_model=MarketsResponse)
+@router.get("/markets")
 async def get_markets(chainId: int = Query(1, alias="chainId")):
     chain_id = validate_chain_id(chainId)
 
@@ -674,7 +695,7 @@ async def get_rewards(
 @register_router.post("/{protocol}/register")
 async def register_address(protocol: str, body: RegisterRequest):
     if protocol != "morpho":
-        raise HTTPException(status_code=400, detail="Unsupported protocol")
+        raise APIError(4001, "Unsupported protocol", 400)
     inserted, skipped = await asyncio.to_thread(
         storage.register_addresses, protocol, body.userAddressList, None
     )
@@ -684,12 +705,11 @@ async def register_address(protocol: str, body: RegisterRequest):
             await fetch_and_store_transactions(address, chain_id)
     if skipped:
         return {
-            "code": 200,
-            "status": "partial_success",
             "message": "Some addresses were already registered",
+            "registered": inserted,
             "skipped": skipped,
         }
-    return {"code": 200, "status": "success"}
+    return {"registered": inserted, "skipped": []}
 
 
 @history_router.get("/{address}/event")
