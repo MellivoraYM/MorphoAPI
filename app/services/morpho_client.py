@@ -507,6 +507,24 @@ def _risk_level(liquidity_usd: Decimal, assets_usd: Decimal) -> str:
     return "Medium Risk"
 
 
+def _withdrawal_availability_fields(liquidity_usd: Decimal, assets_usd: Decimal) -> dict[str, str]:
+    """Returns dict with withdrawalAvailabilityUsd and withdrawalAvailabilityPct."""
+    if assets_usd <= 0:
+        return {"withdrawalAvailabilityUsd": "0", "withdrawalAvailabilityPct": "100.00"}
+    ratio = liquidity_usd / assets_usd
+    if ratio > 1:
+        return {
+            "withdrawalAvailabilityUsd": format_full_decimal(liquidity_usd),
+            "withdrawalAvailabilityPct": "100.00",
+        }
+    usd_val = assets_usd * ratio
+    pct_val = ratio * Decimal("100")
+    return {
+        "withdrawalAvailabilityUsd": format_full_decimal(usd_val),
+        "withdrawalAvailabilityPct": format_decimal(pct_val, 2),
+    }
+
+
 class MorphoClient:
     def __init__(self) -> None:
         self._url = settings.morpho_graphql_url
@@ -618,6 +636,7 @@ async def build_vault_position_from_v1(
         "performanceFee": format_optional_decimal(safe_get(vault_state, "fee"), 2),
         "totalAssets": format_optional_decimal(total_assets_usd, 2),
         "riskLevel": _risk_level(liquidity_usd, to_decimal(safe_get(state, "assetsUsd", 0))),
+        **_withdrawal_availability_fields(liquidity_usd, to_decimal(safe_get(state, "assetsUsd", 0))),
         "dailyReward": daily_reward,
         "allocations": allocations,
     }
@@ -691,6 +710,7 @@ async def build_vault_position_from_v2(
         "performanceFee": format_optional_decimal(safe_get(vault, "performanceFee"), 2),
         "totalAssets": format_optional_decimal(total_assets_usd, 2),
         "riskLevel": _risk_level(liquidity_usd, to_decimal(safe_get(position, "assetsUsd", 0))),
+        **_withdrawal_availability_fields(liquidity_usd, to_decimal(safe_get(position, "assetsUsd", 0))),
         "dailyReward": daily_reward,
         "allocations": allocations,
     }
